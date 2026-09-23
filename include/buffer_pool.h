@@ -8,6 +8,7 @@
 
 #include "disk_manager.h"
 #include "page.h"
+#include "wal.h"
 
 namespace reldb {
 
@@ -73,7 +74,15 @@ class PageGuard {
 // checksums, DiskManager doesn't know about pinning or eviction.
 class BufferPool {
  public:
-  BufferPool(size_t pool_size, DiskManager* disk_manager);
+  // wal_manager is optional (nullptr = no WAL logging — used by
+  // milestone 1's tests, which predate the WAL and don't need crash
+  // durability). When non-null, every page that gets unpinned dirty is
+  // logged — full after-image, fsynced — BEFORE this call returns. That
+  // is the actual durability guarantee: a mutation is never considered
+  // "done" from the caller's point of view until it is safely logged,
+  // not merely applied to the in-memory frame.
+  BufferPool(size_t pool_size, DiskManager* disk_manager,
+             WALManager* wal_manager = nullptr);
 
   BufferPool(const BufferPool&) = delete;
   BufferPool& operator=(const BufferPool&) = delete;
@@ -100,6 +109,12 @@ class BufferPool {
   size_t PoolSize() const { return frames_.size(); }
   size_t FreeFrameCount() const { return free_list_.size(); }
 
+  // Passthrough so higher layers (BTree) never need to hold a separate
+  // DiskManager reference just to ask "does this file have any pages
+  // yet" during initialization — keeps the layering strict (BTree only
+  // ever talks to BufferPool).
+  size_t DiskPageCount() const { return disk_manager_->NumPages(); }
+
  private:
   friend class PageGuard;
 
@@ -124,6 +139,7 @@ class BufferPool {
   std::unordered_map<frame_id_t, std::list<frame_id_t>::iterator> lru_iters_;
 
   DiskManager* disk_manager_;
+  WALManager* wal_manager_;  // nullptr if this pool logs nothing
   std::mutex latch_;
 };
 

@@ -23,6 +23,9 @@ add_library(reldb_core
         src/disk_manager.cpp
         src/buffer_pool.cpp
         src/btree.cpp
+        src/wal.cpp
+        src/recovery.cpp
+        src/database.cpp
 )
 
 enable_testing()

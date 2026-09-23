@@ -48,8 +48,11 @@ void PageGuard::Release() {
 
 // ---------- BufferPool ----------
 
-BufferPool::BufferPool(size_t pool_size, DiskManager* disk_manager)
-    : frames_(pool_size), disk_manager_(disk_manager) {
+BufferPool::BufferPool(size_t pool_size, DiskManager* disk_manager,
+                        WALManager* wal_manager)
+    : frames_(pool_size),
+      disk_manager_(disk_manager),
+      wal_manager_(wal_manager) {
   for (size_t i = 0; i < pool_size; ++i) {
     free_list_.push_back(static_cast<frame_id_t>(i));
   }
@@ -166,6 +169,29 @@ void BufferPool::UnpinPage(page_id_t page_id, bool is_dirty) {
   Frame& frame = frames_[it->second];
   if (is_dirty) {
     frame.dirty = true;
+
+    // The durability hook (see WALManager docs, and the milestone 2
+    // design doc): the moment a page's mutation is done — the guard
+    // that was writing to it is going out of scope, hence this unpin —
+    // it gets logged, full after-image, fsynced, before this call
+    // returns. AppendRecord() also stamps frame.page's LSN as a side
+    // effect. Every dirty unpin logs, even if pin_count doesn't reach
+    // zero (a page could in principle be re-fetched and unpinned more
+    // than once per logical operation) — redundant with the previous
+    // log entry for that page, but never incorrect: recovery always
+    // takes the highest-LSN record per page, so extra entries are just
+    // wasted space, not a correctness risk. That waste is the direct
+    // cost of the full-image-logging simplification, documented
+    // elsewhere.
+    //
+    // wal_manager_ == nullptr means this pool was constructed without
+    // WAL support (milestone 1's tests, which predate crash recovery
+    // entirely) — in that case there's nothing to log, mutations are
+    // only as durable as an explicit Flush/FlushAll call, same as
+    // before this milestone existed.
+    if (wal_manager_ != nullptr) {
+      wal_manager_->AppendRecord(page_id, &frame.page);
+    }
   }
   if (frame.pin_count > 0) {
     frame.pin_count--;

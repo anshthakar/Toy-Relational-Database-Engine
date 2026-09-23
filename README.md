@@ -10,8 +10,11 @@ breadth.
 - Milestone 1 — Storage engine: on-disk B+tree, buffer pool with
   LRU eviction, tested against `std::map` under randomized
   insert/delete/get/range-scan sequences.
-- Milestone 2 — Write-ahead log and crash recovery
-- Milestone 3 — SQL parser
+- Milestone 2 — Write-ahead log and crash recovery: WAL with
+  full-page-image records, REDO-only recovery, tested by both
+  deterministic WAL truncation (~250 truncation points) and real
+  `fork`+`SIGKILL` process death.
+- Milestone 3 — SQL parser**
 - Milestone 4 — Query planner and execution
 
 ## Architecture
@@ -23,21 +26,35 @@ include/
 ├── disk_manager.h      Raw file I/O: read/write pages at fixed offsets
 ├── buffer_pool.h       In-memory page cache: LRU eviction, PageGuard (RAII pins)
 ├── btree_node.h        B+tree cell layout (LeafCell, InternalCell, NodeExtra)
-└── btree.h             BTree: insert / delete / get / range scan
+├── btree.h             BTree: insert / delete / get / range scan
+├── wal.h               WALManager: fixed-size, full-page-image WAL records
+├── recovery.h           RunRecovery: replay the WAL onto the data file
+└── database.h           Database: wires disk + WAL + recovery + buffer pool + tree together
 
 src/
 ├── disk_manager.cpp
 ├── buffer_pool.cpp
-└── btree.cpp
+├── btree.cpp
+├── wal.cpp
+├── recovery.cpp
+└── database.cpp
 
 tests/
 ├── test_disk_manager.cpp   Round-trip I/O, corruption detection, persistence
 ├── test_buffer_pool.cpp    Pin/unpin correctness, LRU order, dirty-page flush
-└── test_btree.cpp          Differential fuzz test vs. std::map, multi-level splits
+├── test_btree.cpp          Differential fuzz test vs. std::map, multi-level splits
+├── test_wal.cpp            Append/reopen, torn-tail truncation on open
+├── test_recovery.cpp       ~250 deterministic WAL-truncation crash simulations
+├── crash_worker.cpp        Standalone binary: inserts N keys, then raise(SIGKILL)
+└── test_crash_kill.cpp     Forks/execs crash_worker, confirms real SIGKILL death,
+                             verifies recovery in a separate process
 ```
 
 Each layer only talks to the one below it: `BTree` → `BufferPool` →
-`DiskManager` → the file. Nothing skips a layer.
+(`DiskManager`, `WALManager`) → the file.
+`Database` is the entry point that gets construction order right:
+open data file → open WAL (self-truncates any torn tail) → run recovery
+→ only then start a WAL-backed buffer pool.
 
 ## Design decisions
 
@@ -54,8 +71,13 @@ Each layer only talks to the one below it: `BTree` → `BufferPool` →
   insertions exercise leaf splits, internal splits, and multi-level
   growth, real 4KB pages could hold far more per node.
 - **LRU eviction**, plain, no scan-resistance (LRU-K, clock).
+- **WAL logs full page images, not byte-level diffs**, fsyncing on every
+  append (no group commit), REDO-only (no UNDO — there's no transaction
+  concept yet to roll back). See `docs/milestone-2.md` for the
+  write-ahead cross-page ordering invariant this depends on, and the
+  real bug that violating it caused.
 
-Full writeup: see `docs/milestone-1.md` *(not yet written)*.
+Full writeups: `docs/milestone-1.md`, `docs/milestone-2.md`.
 
 ## Building
 
@@ -80,6 +102,9 @@ cd build
 ./tests/test_disk_manager
 ./tests/test_buffer_pool
 ./tests/test_btree
+./tests/test_wal
+./tests/test_recovery      # ~9s — ~250 WAL-truncation crash simulations
+./tests/test_crash_kill    # forks real processes and SIGKILLs them
 ```
 
 Or via CTest:
