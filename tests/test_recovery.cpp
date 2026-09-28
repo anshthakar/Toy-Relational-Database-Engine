@@ -1,3 +1,4 @@
+
 // Deterministic crash simulation via WAL truncation.
 //
 // The core invariant under test (derived, not assumed — see the ordering
@@ -35,9 +36,11 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "database.h"
+#include "wal.h"
 
 using namespace reldb;
 
@@ -127,6 +130,86 @@ std::vector<std::pair<int64_t, std::string>> RecoverAndScan(
   RemoveIfExists(wal_copy);
 
   CopyTruncated(wal_path, wal_copy, wal_truncate_size);
+
+  // Diagnostic only: how many records did the truncated copy actually
+  // parse as valid, versus how many full WAL_RECORD_SIZE slots fit in
+  // wal_truncate_size bytes? If these two numbers disagree, the WAL scan
+  // itself stopped early (a checksum mismatch on some record), which is a
+  // completely different failure mode from "recovery walked a stale
+  // pointer" and points at record content, not at recovery's ordering
+  // logic.
+  {
+    off_t actual_copy_size = FileSize(wal_copy);
+    int64_t expected_full_records = wal_truncate_size / static_cast<off_t>(WAL_RECORD_SIZE);
+    WALManager probe(wal_copy);
+    std::printf(
+        "    [wal probe] tag=%s truncate_size=%lld copy_file_size=%lld "
+        "expected_full_records=%lld actual_valid_records=%zu\n",
+        tag.c_str(), (long long)wal_truncate_size, (long long)actual_copy_size,
+        (long long)expected_full_records, probe.ValidRecords().size());
+    std::fflush(stdout);
+    if (static_cast<int64_t>(probe.ValidRecords().size()) != expected_full_records) {
+      std::printf(
+          "    [wal probe] MISMATCH: WAL scan stopped early — record %zu "
+          "failed checksum or was short. Dumping it if present in wal_copy "
+          "post-open (file may have been truncated further by the probe "
+          "itself).\n",
+          probe.ValidRecords().size());
+      std::fflush(stdout);
+    }
+
+    // Counts matched, but that only proves the SCAN read the right number
+    // of records — it says nothing about whether each record's page_id
+    // field is what it should be. Reduce to "latest per page_id" here (the
+    // same reduction RunRecovery does) and print the resulting set's shape:
+    // distinct page count, min/max id, and whether 27 specifically shows
+    // up. If the count of records exceeds the count of distinct pages by
+    // more than expected, or a page_id looks out of a sane range, that's a
+    // corrupted page_id field in some record, not a recovery-ordering bug.
+    std::unordered_map<page_id_t, uint64_t> latest_lsn;
+    for (auto& rec : probe.ValidRecords()) {
+      auto it = latest_lsn.find(rec.page_id);
+      if (it == latest_lsn.end() || rec.lsn > it->second) {
+        latest_lsn[rec.page_id] = rec.lsn;
+      }
+    }
+    page_id_t min_id = probe.ValidRecords().empty() ? 0 : latest_lsn.begin()->first;
+    page_id_t max_id = min_id;
+    for (auto& [pid, lsn] : latest_lsn) {
+      if (pid < min_id) min_id = pid;
+      if (pid > max_id) max_id = pid;
+    }
+    bool has_gap = (latest_lsn.size() != static_cast<size_t>(max_id) + 1 -
+                    (latest_lsn.empty() ? 0 : min_id));
+    std::printf(
+        "    [page-id probe] tag=%s distinct_pages=%zu min_id=%u max_id=%u "
+        "has_27=%s gap_in_0..max=%s\n",
+        tag.c_str(), latest_lsn.size(), min_id, max_id,
+        latest_lsn.count(27) ? "yes" : "NO", has_gap ? "YES" : "no");
+    std::fflush(stdout);
+
+    // Full per-record dump, only for the one case we already know is bad —
+    // this is the direct evidence of which record carries an unexpected
+    // page_id. (index, lsn, page_id, page_type, num_slots) for every
+    // record in file order.
+    if (tag == "mid_35_90") {
+      std::printf("    [record dump] tag=%s (%zu records)\n", tag.c_str(),
+                   probe.ValidRecords().size());
+      size_t idx = 0;
+      for (auto& rec : probe.ValidRecords()) {
+        std::printf("      #%zu lsn=%llu page_id=%u type=%d num_slots=%u\n",
+                    idx, (unsigned long long)rec.lsn, rec.page_id,
+                    (int)rec.page.header()->page_type,
+                    rec.page.header()->num_slots);
+        idx++;
+      }
+      std::fflush(stdout);
+    }
+  }
+  // NOTE: constructing `probe` above may have truncated wal_copy's file if
+  // it found a torn tail (same as any WALManager constructor does) — that
+  // is fine here since Database below opens its own WALManager on the same
+  // path and would truncate identically anyway.
 
   std::vector<std::pair<int64_t, std::string>> result;
   {
@@ -312,3 +395,4 @@ int main() {
   std::printf("\n%zu tests, %d failed\n", tests.size(), failures);
   return failures == 0 ? 0 : 1;
 }
+ 

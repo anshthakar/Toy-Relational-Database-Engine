@@ -1,3 +1,4 @@
+
 #include "btree.h"
 
 #include <algorithm>
@@ -51,22 +52,40 @@ void BTree::Insert(int64_t key, const std::string& value) {
 
   // The root itself split. Wrap it in a brand new root so the tree grows
   // upward rather than needing every existing page to move.
-  PageGuard new_root_guard = buffer_pool_->NewPage();
-  if (!new_root_guard.valid()) {
-    throw std::runtime_error("BTree::Insert: buffer pool exhausted");
-  }
-  Page* rp = new_root_guard.page();
-  rp->header()->page_type = PageType::INTERNAL;
-  rp->header()->num_slots = 1;
-  GetNodeExtra(rp)->leftmost_child = root_page_id_;
-  InternalCells(rp)[0] = {split->promoted_key, split->new_right_page_id, {}};
-  new_root_guard.MarkDirty();
+  //
+  // Write-ahead ordering matters here, not just within the page (that's
+  // what the WAL protects generally) but ACROSS pages: the metadata page
+  // is about to start pointing at this new root, so the new root's own
+  // content must be durable (logged) FIRST. If it logged the other way
+  // around, a crash in between would leave a recovered database whose
+  // metadata page points at a root page that was never itself written —
+  // pointing into nothing. C++ destructs locals in reverse declaration
+  // order, and destruction is what triggers the unpin-time WAL log (see
+  // BufferPool::UnpinPage), so new_root_guard is deliberately confined to
+  // its own inner scope: it must be fully destructed, and therefore
+  // logged, before meta_guard is even constructed.
+  page_id_t new_root_id;
+  {
+    PageGuard new_root_guard = buffer_pool_->NewPage();
+    if (!new_root_guard.valid()) {
+      throw std::runtime_error("BTree::Insert: buffer pool exhausted");
+    }
+    Page* rp = new_root_guard.page();
+    rp->header()->page_type = PageType::INTERNAL;
+    rp->header()->num_slots = 1;
+    GetNodeExtra(rp)->leftmost_child = root_page_id_;
+    InternalCells(rp)[0] = {split->promoted_key, split->new_right_page_id, {}};
+    new_root_guard.MarkDirty();
+    new_root_id = new_root_guard.page_id();
+  }  // new_root_guard destructs here: logged BEFORE metadata references it
 
-  root_page_id_ = new_root_guard.page_id();
+  root_page_id_ = new_root_id;
 
-  PageGuard meta_guard = buffer_pool_->FetchPage(metadata_page_id_);
-  GetMetadata(meta_guard.page())->root_page_id = root_page_id_;
-  meta_guard.MarkDirty();
+  {
+    PageGuard meta_guard = buffer_pool_->FetchPage(metadata_page_id_);
+    GetMetadata(meta_guard.page())->root_page_id = root_page_id_;
+    meta_guard.MarkDirty();
+  }  // meta_guard destructs here: logged AFTER, safe to reference new root
 }
 
 std::optional<BTree::SplitResult> BTree::InsertRecursive(

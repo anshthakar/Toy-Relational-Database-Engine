@@ -20,7 +20,7 @@ PageGuard::PageGuard(PageGuard&& other) noexcept
 
 PageGuard& PageGuard::operator=(PageGuard&& other) noexcept {
   if (this != &other) {
-    Release();  // release whatever this guard currently holds, if anything
+    Release();
     pool_ = other.pool_;
     page_id_ = other.page_id_;
     frame_ = other.frame_;
@@ -82,10 +82,6 @@ frame_id_t BufferPool::FindVictimFrame() {
     return id;
   }
 
-  // Scan from the back (least recently used end) for the first frame with
-  // no active pins. A toy-project simplification: this is O(n) in the
-  // worst case rather than tracking an "unpinned tail" separately, which
-  // is fine at the frame counts this project runs at.
   for (auto it = lru_list_.rbegin(); it != lru_list_.rend(); ++it) {
     frame_id_t candidate = *it;
     Frame& frame = frames_[candidate];
@@ -100,7 +96,7 @@ frame_id_t BufferPool::FindVictimFrame() {
     }
   }
 
-  return INVALID_FRAME_ID;  // every frame is pinned; nothing evictable
+  return INVALID_FRAME_ID;
 }
 
 PageGuard BufferPool::FetchPage(page_id_t page_id) {
@@ -117,7 +113,7 @@ PageGuard BufferPool::FetchPage(page_id_t page_id) {
 
   frame_id_t frame_id = FindVictimFrame();
   if (frame_id == INVALID_FRAME_ID) {
-    return PageGuard();  // pool exhausted, nothing pinnable
+    return PageGuard();
   }
 
   Frame& frame = frames_[frame_id];
@@ -147,9 +143,7 @@ PageGuard BufferPool::NewPage() {
   frame.page.header()->page_id = new_id;
   frame.page_id = new_id;
   frame.pin_count = 1;
-  // Dirty from the moment it exists: its content only lives in memory so
-  // far, disk has never been told about this page id's contents. If it
-  // gets evicted before an explicit flush, eviction must write it out.
+
   frame.dirty = true;
 
   page_table_[new_id] = frame_id;
@@ -163,32 +157,13 @@ void BufferPool::UnpinPage(page_id_t page_id, bool is_dirty) {
 
   auto it = page_table_.find(page_id);
   if (it == page_table_.end()) {
-    return;  // already evicted somehow; nothing to unpin
+    return;
   }
 
   Frame& frame = frames_[it->second];
   if (is_dirty) {
     frame.dirty = true;
 
-    // The durability hook (see WALManager docs, and the milestone 2
-    // design doc): the moment a page's mutation is done — the guard
-    // that was writing to it is going out of scope, hence this unpin —
-    // it gets logged, full after-image, fsynced, before this call
-    // returns. AppendRecord() also stamps frame.page's LSN as a side
-    // effect. Every dirty unpin logs, even if pin_count doesn't reach
-    // zero (a page could in principle be re-fetched and unpinned more
-    // than once per logical operation) — redundant with the previous
-    // log entry for that page, but never incorrect: recovery always
-    // takes the highest-LSN record per page, so extra entries are just
-    // wasted space, not a correctness risk. That waste is the direct
-    // cost of the full-image-logging simplification, documented
-    // elsewhere.
-    //
-    // wal_manager_ == nullptr means this pool was constructed without
-    // WAL support (milestone 1's tests, which predate crash recovery
-    // entirely) — in that case there's nothing to log, mutations are
-    // only as durable as an explicit Flush/FlushAll call, same as
-    // before this milestone existed.
     if (wal_manager_ != nullptr) {
       wal_manager_->AppendRecord(page_id, &frame.page);
     }

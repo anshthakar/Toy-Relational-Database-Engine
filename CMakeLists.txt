@@ -8,10 +8,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-# Debug builds get sanitizers on by default. This is not optional for a
-# project graded on "undefined behavior is a real failure, not a style nit" —
-# ASan/UBSan catch use-after-free, buffer overruns, and signed overflow that
-# will otherwise hide silently until a crash test fails for a confusing reason.
+# debug builds get sanitizers on by default
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer")
 set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
 
@@ -26,6 +23,10 @@ add_library(reldb_core
         src/wal.cpp
         src/recovery.cpp
         src/database.cpp
+        src/token.cpp
+        src/lexer.cpp
+        src/ast.cpp
+        src/parser.cpp
 )
 
 enable_testing()
