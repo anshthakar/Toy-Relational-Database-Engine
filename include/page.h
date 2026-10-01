@@ -19,6 +19,9 @@ enum class PageType : uint8_t {
   LEAF = 1,
   INTERNAL = 2,
   METADATA = 3,
+  CATALOG = 4,  // milestone 4: the one page (page_id 0 in catalog-managed
+                // databases) listing every table's schema + root_page_id.
+                // See catalog_page.h.
 };
 
 #pragma pack(push, 1)

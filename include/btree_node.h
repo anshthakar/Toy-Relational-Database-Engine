@@ -18,7 +18,13 @@ namespace reldb {
 //    multiple tree levels. A real engine would size this from the page,
 //    not hardcode it.
 
-constexpr size_t VALUE_SIZE = 32;
+// VALUE_SIZE was 32 bytes through milestone 1/2 (plenty for the single
+// short test strings those milestones stored). Milestone 4 needs a
+// whole row's non-key columns to fit in one value, via RowCodec
+// (see row_codec.h) — raised to 120 to give a handful of INTEGER/TEXT
+// columns real room while keeping the "fixed-size value" simplification
+// from milestone 1 intact (still no variable-length slotted layout).
+constexpr size_t VALUE_SIZE = 120;
 constexpr size_t LEAF_MAX_KEYS = 4;
 constexpr size_t INTERNAL_MAX_KEYS = 4;
 
@@ -36,9 +42,9 @@ struct LeafCell {
   int64_t key;
   uint16_t value_len;
   char value[VALUE_SIZE];
-  uint8_t reserved[6];  // pads 8+2+32=42 up to 48 (multiple of 8) so every
-                         // element of a LeafCell array keeps `key` aligned,
-                         // not just the first one.
+  uint8_t reserved[6];  // pads 8+2+120=130 up to 136 (multiple of 8) so
+                         // every element of a LeafCell array keeps `key`
+                         // aligned, not just the first one.
 };
 
 // child = page id of the subtree holding all keys > this cell's key (and,

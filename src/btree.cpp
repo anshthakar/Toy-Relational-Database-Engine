@@ -1,4 +1,3 @@
-
 #include "btree.h"
 
 #include <algorithm>
@@ -35,6 +34,19 @@ BTree::BTree(BufferPool* buffer_pool) : buffer_pool_(buffer_pool) {
       throw std::runtime_error("BTree: could not read metadata page");
     }
     root_page_id_ = GetMetadata(meta_guard.page())->root_page_id;
+  }
+}
+
+BTree::BTree(BufferPool* buffer_pool, page_id_t root_page_id,
+             std::function<void(page_id_t)> on_root_changed)
+    : buffer_pool_(buffer_pool),
+      catalog_managed_(true),
+      on_root_changed_(std::move(on_root_changed)),
+      root_page_id_(root_page_id) {
+  if (!on_root_changed_) {
+    throw std::invalid_argument(
+        "BTree: catalog-managed constructor requires a non-empty "
+        "on_root_changed callback");
   }
 }
 
@@ -81,11 +93,23 @@ void BTree::Insert(int64_t key, const std::string& value) {
 
   root_page_id_ = new_root_id;
 
-  {
+  // Record the new root somewhere durable. Which "somewhere" depends on
+  // construction mode:
+  //   - catalog-managed: on_root_changed_ is the Catalog's own callback,
+  //     which writes into the catalog page under the SAME write-ahead
+  //     discipline (it pins/dirties/unpins that page itself, so the same
+  //     reverse-destruction-order argument above still applies — the new
+  //     root was already logged, in the scope above, before we get here).
+  //   - single-table (legacy): write directly into this tree's private
+  //     metadata page, exactly as before this constructor existed.
+  if (catalog_managed_) {
+    on_root_changed_(root_page_id_);
+  } else {
     PageGuard meta_guard = buffer_pool_->FetchPage(metadata_page_id_);
     GetMetadata(meta_guard.page())->root_page_id = root_page_id_;
     meta_guard.MarkDirty();
-  }  // meta_guard destructs here: logged AFTER, safe to reference new root
+  }  // meta_guard (if constructed) destructs here: logged AFTER, safe to
+     // reference new root
 }
 
 std::optional<BTree::SplitResult> BTree::InsertRecursive(
